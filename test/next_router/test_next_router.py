@@ -161,11 +161,20 @@ class OneShotAutomationTest(unittest.TestCase):
             "AUTOMATION_DB_PATH": CTL.AUTOMATION_DB_PATH,
             "DISABLED_PATH": CTL.DISABLED_PATH,
             "STATE_DIR": CTL.STATE_DIR,
+            "SESSION_ROOT": CTL.SESSION_ROOT,
+            "ROUTER_CONFIG_PATH": CTL.ROUTER_CONFIG_PATH,
         }
         CTL.AUTOMATION_PATH = self.automation_toml
         CTL.AUTOMATION_DB_PATH = self.automation_db
         CTL.DISABLED_PATH = self.disabled_path
         CTL.STATE_DIR = self.state_dir
+        CTL.SESSION_ROOT = root / "sessions"
+        CTL.ROUTER_CONFIG_PATH = root / "next_router_config.json"
+        CTL.SESSION_ROOT.mkdir(parents=True)
+        CTL.ROUTER_CONFIG_PATH.write_text(
+            json.dumps({"target_sessions": ["target-session"]}),
+            encoding="utf-8",
+        )
 
     def tearDown(self):
         for key, value in self.originals.items():
@@ -198,6 +207,35 @@ class OneShotAutomationTest(unittest.TestCase):
 
         self.assertEqual(self.automation_row(), ("PAUSED", "FREQ=MINUTELY;INTERVAL=1", None))
         self.assertIn('status = "PAUSED"', self.automation_toml.read_text(encoding="utf-8"))
+
+    def write_session_log(self, lines):
+        session_log = CTL.SESSION_ROOT / "2026" / "04" / "29" / "rollout-target-session.jsonl"
+        session_log.parent.mkdir(parents=True, exist_ok=True)
+        session_log.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        return session_log
+
+    def test_target_status_reports_quota_block_even_when_task_complete_follows_error(self):
+        self.write_session_log([
+            '{"timestamp":"2026-04-29T09:38:26.568Z","type":"event_msg","payload":{"type":"task_started"}}',
+            '{"timestamp":"2026-04-29T09:38:28.217Z","type":"event_msg","payload":{"type":"error","message":"You have hit your usage limit. try again at 8:52 PM.","codex_error_info":"usage_limit_exceeded"}}',
+            '{"timestamp":"2026-04-29T09:38:28.221Z","type":"event_msg","payload":{"type":"task_complete","last_agent_message":"old result"}}',
+        ])
+
+        status = CTL.target_session_status()
+
+        self.assertEqual(status["status"], "QUOTA_BLOCKED")
+        self.assertEqual(status["retry_hint"], "8:52 PM")
+
+    def test_target_status_recovers_when_a_new_turn_starts_after_quota_error(self):
+        self.write_session_log([
+            '{"timestamp":"2026-04-29T09:38:26.568Z","type":"event_msg","payload":{"type":"task_started"}}',
+            '{"timestamp":"2026-04-29T09:38:28.217Z","type":"event_msg","payload":{"type":"error","message":"You have hit your usage limit. try again at 8:52 PM.","codex_error_info":"usage_limit_exceeded"}}',
+            '{"timestamp":"2026-04-29T10:02:43.827Z","type":"event_msg","payload":{"type":"task_started"}}',
+        ])
+
+        status = CTL.target_session_status()
+
+        self.assertEqual(status["status"], "RUNNING")
 
 
 if __name__ == "__main__":

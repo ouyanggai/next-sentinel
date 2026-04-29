@@ -19,6 +19,7 @@ Next Sentinel 的做法：hooks 做主链路，自动化只做重启后的兜底
 - 监听 Codex App 启动（`com.openai.codex`），60 秒后自动触发兜底
 - 菜单查看 hooks 状态、自动化状态、调度信息、最近动作
 - 支持手动启动/停止 NEXT、立即触发兜底、打开日志
+- 识别目标会话 `usage_limit_exceeded`，状态栏显示"目标 额度阻塞"，切号后可手动触发一次重试
 - 完整 hook 脚本：`next_session_start.py`、`next_stop_router.py`、`next_ctl.py`
 - 提供安装脚本、重启 Codex 脚本、配置示例、测试用例
 
@@ -140,6 +141,8 @@ python3 ~/.codex/hooks/next_ctl.py stop
 python3 ~/.codex/hooks/next_ctl.py trigger
 ```
 
+如果目标会话最近一次启动被额度限制拦住，`status` 会显示 `target_status: QUOTA_BLOCKED`。切换账号或额度恢复后，再执行一次 `trigger` 即可重新投递；它不会恢复每分钟轮询，触发完成后仍会回到 `PAUSED`。
+
 ### NEXT 协议
 
 每轮任务结束时，Agent 写一个标识：
@@ -219,12 +222,16 @@ SessionStart hook: True
 Stop hook: True
 automation-2 toml: PAUSED
 automation-2 db: PAUSED
+target_status: COMPLETE session=019dd35c-44dc-7f21-a513-46d07b3b10b1
 ```
 
 - `NEXT hooks: ACTIVE` — NEXT 路由启用
 - `NEXT hooks: STOPPED` — 通过 `NEXT_ROUTER_DISABLED` 暂停
 - `automation-2 db: PAUSED` — 兜底自动化空闲
 - `automation-2 db: ACTIVE` — 正在等待单次触发执行
+- `target_status: QUOTA_BLOCKED` — 目标会话最近一次请求被额度限制拦住，切号或额度恢复后手动触发兜底
+- `target_status: RUNNING` — 目标会话已有新一轮开始，正在运行或尚未输出最终结果
+- `target_status: COMPLETE` — 目标会话最近一轮有明确完成记录
 
 ## 测试
 
@@ -238,6 +245,8 @@ python3 -m unittest discover -s test -p 'test_*.py'
 - 协议说明行不被误判
 - `实现`/`修复` 发送两个技能引用
 - `automation-2` 单次触发后回到 `PAUSED`
+- 额度错误后即使出现 `task_complete` 也识别为 `QUOTA_BLOCKED`
+- 额度错误后新一轮 `task_started` 会恢复为 `RUNNING`
 
 ## Cockpit 自动切号
 

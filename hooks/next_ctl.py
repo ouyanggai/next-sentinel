@@ -22,7 +22,10 @@ ROUTER_CONFIG_PATH = Path(os.environ.get("NEXT_ROUTER_CONFIG", HOOKS_DIR / "next
 DISABLED_PATH = Path(os.environ.get("NEXT_ROUTER_DISABLED", HOOKS_DIR / "NEXT_ROUTER_DISABLED")).expanduser()
 STATE_DIR = Path(os.environ.get("NEXT_ROUTER_STATE_DIR", HOOKS_DIR / ".next-router-state")).expanduser()
 LOG_PATH = Path(os.environ.get("NEXT_ROUTER_LOG", HOOKS_DIR / "next_router.log")).expanduser()
+SESSION_ROOT = Path(os.environ.get("NEXT_SESSION_ROOT", CODEX_HOME / "sessions")).expanduser()
 ONE_SHOT_WATCH_SECONDS = int(os.environ.get("NEXT_ONE_SHOT_WATCH_SECONDS", "180"))
+SESSION_TAIL_BYTES = int(os.environ.get("NEXT_SESSION_TAIL_BYTES", str(1024 * 1024)))
+QUOTA_ERROR_CODE = "usage_limit_exceeded"
 
 
 def read_text(path):
@@ -158,10 +161,94 @@ def state_files():
     return sorted(STATE_DIR.glob("*.json"))
 
 
+def session_log_candidates(session_id):
+    if not session_id or not SESSION_ROOT.exists():
+        return []
+    return sorted(
+        SESSION_ROOT.glob(f"**/*{session_id}.jsonl"),
+        key=lambda path: path.stat().st_mtime,
+        reverse=True,
+    )
+
+
+def read_tail(path, max_bytes=SESSION_TAIL_BYTES):
+    try:
+        size = path.stat().st_size
+        with path.open("rb") as f:
+            if size > max_bytes:
+                f.seek(size - max_bytes)
+                f.readline()
+            return f.read().decode("utf-8", errors="replace")
+    except Exception:
+        return ""
+
+
+def parse_session_tail(path):
+    latest = {
+        "task_started": None,
+        "task_complete": None,
+        "quota_error": None,
+        "quota_message": None,
+        "path": str(path),
+    }
+    for line in read_tail(path).splitlines():
+        try:
+            event = json.loads(line)
+        except Exception:
+            continue
+        timestamp = event.get("timestamp")
+        payload = event.get("payload") or {}
+        if event.get("type") != "event_msg":
+            continue
+        event_type = payload.get("type")
+        if event_type == "task_started":
+            latest["task_started"] = timestamp
+        elif event_type == "task_complete":
+            latest["task_complete"] = timestamp
+        elif event_type == "error" and payload.get("codex_error_info") == QUOTA_ERROR_CODE:
+            latest["quota_error"] = timestamp
+            latest["quota_message"] = payload.get("message") or ""
+    return latest
+
+
+def retry_hint(message):
+    if not message:
+        return ""
+    match = re.search(r"try again at ([^.]+)", message)
+    return match.group(1).strip() if match else ""
+
+
+def target_session_status(router_config=None):
+    router_config = router_config or load_router_config()
+    for session_id in router_config.get("target_sessions") or []:
+        candidates = session_log_candidates(session_id)
+        if not candidates:
+            continue
+        latest = parse_session_tail(candidates[0])
+        latest["session_id"] = session_id
+        quota_error = latest.get("quota_error")
+        task_started = latest.get("task_started")
+        task_complete = latest.get("task_complete")
+        if quota_error and (not task_started or quota_error >= task_started):
+            latest["status"] = "QUOTA_BLOCKED"
+            latest["retry_hint"] = retry_hint(latest.get("quota_message"))
+            return latest
+        if task_started and (not task_complete or task_started > task_complete):
+            latest["status"] = "RUNNING"
+            return latest
+        if task_complete:
+            latest["status"] = "COMPLETE"
+            return latest
+        latest["status"] = "UNKNOWN"
+        return latest
+    return {"status": "UNKNOWN"}
+
+
 def print_status():
     config = read_text(CONFIG_PATH)
     automation = read_text(AUTOMATION_PATH)
     router_config = load_router_config()
+    target_status = target_session_status(router_config)
 
     codex_hooks = get_toml_bool(config, "codex_hooks")
     automation_status = get_toml_string(automation, "status")
@@ -179,6 +266,12 @@ def print_status():
     print(f"{AUTOMATION_ID} next_run_at: {(automation_db or {}).get('next_run_at') or 'UNKNOWN'}")
     print("target_sessions: " + ", ".join(router_config.get("target_sessions") or []))
     print("target_cwds: " + ", ".join(router_config.get("target_cwds") or []))
+    target_line = f"target_status: {target_status.get('status') or 'UNKNOWN'}"
+    if target_status.get("session_id"):
+        target_line += f" session={target_status['session_id']}"
+    if target_status.get("retry_hint"):
+        target_line += f" retry_after={target_status['retry_hint']}"
+    print(target_line)
     print(f"state_files: {len(state_files())}")
     print("last_hook_events:")
     if LOG_PATH.exists():
@@ -205,9 +298,15 @@ def stop():
 
 
 def trigger():
+    target_status = target_session_status()
     changed, now_ms = schedule_automation_now()
     if changed:
-        print(f"{AUTOMATION_ID} scheduled once now: {now_ms}")
+        if target_status.get("status") == "QUOTA_BLOCKED":
+            hint = target_status.get("retry_hint")
+            suffix = f"; previous quota retry_after={hint}" if hint else "; previous quota block detected"
+            print(f"{AUTOMATION_ID} quota retry scheduled once now: {now_ms}{suffix}")
+        else:
+            print(f"{AUTOMATION_ID} scheduled once now: {now_ms}")
     else:
         print(f"{AUTOMATION_ID} not found")
         sys.exit(1)

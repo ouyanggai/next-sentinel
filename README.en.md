@@ -19,6 +19,7 @@ Next Sentinel's approach: hooks handle the main loop, automation only covers res
 - Watches Codex App launch (`com.openai.codex`), triggers fallback after 60 seconds
 - Menu shows hook status, automation status, schedule, recent actions
 - Manual start/stop NEXT, trigger fallback, open logs
+- Detects target-session `usage_limit_exceeded`, shows target quota blocking, and lets you retry once after switching accounts
 - Complete hook scripts: `next_session_start.py`, `next_stop_router.py`, `next_ctl.py`
 - Install scripts, Codex restart script, config examples, test suite
 
@@ -140,6 +141,8 @@ python3 ~/.codex/hooks/next_ctl.py stop
 python3 ~/.codex/hooks/next_ctl.py trigger
 ```
 
+If the target session was last stopped by a quota error, `status` prints `target_status: QUOTA_BLOCKED`. After switching accounts or waiting for quota recovery, run `trigger` once to retry. This does not re-enable minute polling; the automation still returns to `PAUSED`.
+
 ### NEXT Protocol
 
 Agent writes a marker at end of each turn:
@@ -219,12 +222,16 @@ SessionStart hook: True
 Stop hook: True
 automation-2 toml: PAUSED
 automation-2 db: PAUSED
+target_status: COMPLETE session=019dd35c-44dc-7f21-a513-46d07b3b10b1
 ```
 
 - `NEXT hooks: ACTIVE` — routing enabled
 - `NEXT hooks: STOPPED` — paused via `NEXT_ROUTER_DISABLED`
 - `automation-2 db: PAUSED` — fallback idle
 - `automation-2 db: ACTIVE` — waiting for trigger execution
+- `target_status: QUOTA_BLOCKED` — target session was blocked by quota; switch accounts or wait for quota recovery, then trigger once
+- `target_status: RUNNING` — a newer target turn has started and has not completed yet
+- `target_status: COMPLETE` — the latest target turn has a completion record
 
 ## Tests
 
@@ -238,6 +245,8 @@ Coverage:
 - Protocol description lines not misidentified
 - Implement/fix routes send both skill links
 - `automation-2` returns to `PAUSED` after one-shot trigger
+- Quota errors stay visible as `QUOTA_BLOCKED` even when Codex records a `task_complete` event afterward
+- A new `task_started` after a quota error recovers the target status to `RUNNING`
 
 ## Cockpit Account Switching
 

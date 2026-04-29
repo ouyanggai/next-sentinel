@@ -62,6 +62,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var countdownTimer: Timer?
     private var scheduledFireDate: Date?
     private var statusIcon: NSImage?
+    private var lastTargetStatusCode = "UNKNOWN"
 
     func applicationWillFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
@@ -73,10 +74,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         configureStatusItem()
         configureMenu()
         observeCodexLifecycle()
-        refreshStatus()
-
-        if isCodexRunning() {
-            scheduleFallback(reason: "Codex 已在运行")
+        refreshStatus { [weak self] in
+            guard let self else { return }
+            if self.isCodexRunning() {
+                self.scheduleFallbackForExistingCodex()
+            }
         }
     }
 
@@ -193,6 +195,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         DispatchQueue.main.asyncAfter(deadline: .now() + triggerDelay, execute: workItem)
     }
 
+    private func scheduleFallbackForExistingCodex() {
+        if lastTargetStatusCode == "RUNNING" {
+            updateLastAction("Codex 已在运行，目标运行中，不触发兜底")
+            return
+        }
+        if lastTargetStatusCode == "COMPLETE" {
+            updateLastAction("Codex 已在运行，目标已完成，不触发兜底")
+            return
+        }
+        scheduleFallback(reason: "Codex 已在运行")
+    }
+
     private func startCountdown() {
         stopCountdown()
         countdownTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
@@ -300,10 +314,41 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let lines = output.split(separator: "\n").map(String.init)
         let hooks = lines.first(where: { $0.hasPrefix("NEXT hooks:") })?.replacingOccurrences(of: "NEXT hooks: ", with: "") ?? "UNKNOWN"
         let automation = statusValue(lines, suffix: " db:")
-        let schedule = statusValue(lines, suffix: " schedule:")
         let nextRun = statusValue(lines, suffix: " next_run_at:")
+        let target = targetStatusValue(lines)
+        lastTargetStatusCode = targetStatusCode(lines)
 
-        statusItemTitle.title = "状态：NEXT \(hooks) / 兜底 \(automation) / \(schedule) / next \(nextRun)"
+        statusItemTitle.title = "状态：NEXT \(hooks) / 兜底 \(automation) / 目标 \(target) / next \(nextRun)"
+    }
+
+    private func targetStatusCode(_ lines: [String]) -> String {
+        guard let line = lines.first(where: { $0.hasPrefix("target_status:") }) else {
+            return "UNKNOWN"
+        }
+        if line.contains("QUOTA_BLOCKED") { return "QUOTA_BLOCKED" }
+        if line.contains("RUNNING") { return "RUNNING" }
+        if line.contains("COMPLETE") { return "COMPLETE" }
+        return "UNKNOWN"
+    }
+
+    private func targetStatusValue(_ lines: [String]) -> String {
+        guard let line = lines.first(where: { $0.hasPrefix("target_status:") }) else {
+            return "UNKNOWN"
+        }
+        if line.contains("QUOTA_BLOCKED") {
+            if let range = line.range(of: "retry_after=") {
+                let hint = String(line[range.upperBound...]).trimmingCharacters(in: .whitespacesAndNewlines)
+                return hint.isEmpty ? "额度阻塞" : "额度阻塞 \(hint)"
+            }
+            return "额度阻塞"
+        }
+        if line.contains("RUNNING") {
+            return "运行中"
+        }
+        if line.contains("COMPLETE") {
+            return "完成"
+        }
+        return "UNKNOWN"
     }
 
     private func statusValue(_ lines: [String], suffix: String) -> String {
