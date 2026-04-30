@@ -1,6 +1,11 @@
 .DS_Store
 build/
 dist/
+node_modules/
+reports/
+coverage/
+test-results/
+playwright-report/
 *.log
 *.pyc
 __pycache__/
